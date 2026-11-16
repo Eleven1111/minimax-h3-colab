@@ -26,6 +26,7 @@ const state = {
   library: [], folders: [], folder: null, tray: [], libKind: "all", mode: "ref", first: null, last: null,
   aspect: "auto", resolution: "720P", intensity: "off", imageSize: "1.3K", top: "video", videoMode: "ref",
   config: null, rewriteSig: null, busy: false, jobs: [], seenStatus: {}, videoTab: {},
+  voiceReference: null, voiceUploading: false,
 };
 
 // ------------------------------------------------------------ api
@@ -143,6 +144,36 @@ async function uploadFiles(files) {
   }
   renderLibrary();
   toast("上傳完成 ✨");
+}
+
+function renderVoiceReference() {
+  const item = state.voiceReference && assetById(state.voiceReference);
+  $("#voiceName").textContent = item ? item.name : "尚未選擇聲音";
+  const preview = $("#voicePreview");
+  preview.hidden = !item;
+  if (item) preview.src = `library/${encodeURIComponent(item.file)}`;
+  else preview.removeAttribute("src");
+}
+
+async function uploadVoice(file) {
+  if (!file) return;
+  if (file.type && !file.type.startsWith("audio/")) throw new Error("請選擇音訊檔案");
+  state.voiceUploading = true;
+  $("#voiceInput").disabled = true;
+  $("#voiceName").textContent = "聲音上傳中…";
+  try {
+    const item = await api("api/upload", file, { "X-Filename": encodeURIComponent(file.name),
+      "X-Folder": state.folder || "", "Content-Type": "application/octet-stream" });
+    if (item.kind !== "audio") throw new Error("聲音參考必須是音訊檔案");
+    if (!assetById(item.id)) state.library.unshift(item);
+    state.voiceReference = item.id;
+    renderLibrary();
+    markStale();
+  } finally {
+    state.voiceUploading = false;
+    $("#voiceInput").disabled = false;
+    renderVoiceReference();
+  }
 }
 
 // ------------------------------------------------------------ tray + labels (ref mode)
@@ -377,9 +408,11 @@ function requestBody() {
     first_id: state.mode === "frames" ? state.first : null, last_id: state.mode === "frames" ? state.last : null,
     seconds: +$("#seconds").value, aspect: state.aspect, resolution: state.resolution, intensity: state.intensity,
     skill: $("#skill").value, seed: $("#seed").value === "" ? null : +$("#seed").value, fast: $("#fastMode").checked,
+    voice_clone: { enabled: state.top === "video" && $("#useVoiceClone").checked,
+      reference_id: state.voiceReference, text: $("#voiceText").value.trim(), keep_background: true },
   };
 }
-const signature = () => { const b = requestBody(); return JSON.stringify([b.mode, b.prompt, b.tray, b.first_id, b.last_id, b.mode === "image" ? 0 : b.seconds, b.skill]); };
+const signature = () => { const b = requestBody(); return JSON.stringify([b.mode, b.prompt, b.tray, b.first_id, b.last_id, b.mode === "image" ? 0 : b.seconds, b.skill, b.voice_clone]); };
 
 function markStale() {
   if ($("#rewriteBox").hidden) return;
@@ -396,6 +429,13 @@ function setBusy(busy, label) {
 function validate() {
   const body = requestBody();
   if (!body.prompt.trim()) throw new Error("請先寫一段描述喔");
+  if (body.voice_clone.enabled) {
+    if (!state.config?.config.voice_clone?.enabled) throw new Error("尚未安裝或啟用 IndexTTS2，請先完成聲音克隆設定");
+    if (state.voiceUploading) throw new Error("請等聲音上傳完成");
+    if (!assetById(body.voice_clone.reference_id)) throw new Error("請先上傳你的聲音");
+    if (!body.voice_clone.text) throw new Error("請填入要說的台詞");
+    if (body.tray.some(item => item.extend)) throw new Error("聲音克隆目前不支援延伸影片，請移除延伸素材");
+  }
   if (body.mode === "frames" && !body.first_id && !body.last_id) throw new Error("頭尾格模式至少要放一張首格或尾格");
   if (body.mode === "ref" || body.mode === "image") {
     const valid = new Set(trayLabels().filter(t => t.label).map(t => t.label));
@@ -465,10 +505,11 @@ async function doGenerate() {
 }
 
 // ------------------------------------------------------------ jobs
-const STATUS = { queued: "排隊中", running: "生成中", joining: "接回原片", done: "完成", error: "失敗" };
+const STATUS = { queued: "排隊中", running: "生成中", joining: "接回原片", dubbing: "聲音克隆配音中", voice_error: "配音失敗，原片可用", done: "完成", error: "失敗" };
 const STAGE = {
   queued: "排隊等 ComfyUI 有空…", prepare: "準備素材、載入模型", draw: "一筆一筆畫出來", low: "先畫出低解析度的動作與構圖",
   high: "長出高解析度的細節", decode: "解碼畫面與聲音、存檔", join: "把新片段接回原片",
+  dubbing: "以你的聲音重新配音並合成影片",
 };
 const INTENSITY = { off: "文戲", low: "動作·低", mid: "動作·中", high: "動作·高" };
 
@@ -479,10 +520,11 @@ function jobMedia(j) {
     const cheer = state.cheer?.has(j.id) ? `<img class="cheer" src="static/img/cheer.png" alt="">` : "";
     return `<div class="media">${cheer}<a href="${viewUrl(j.image)}" target="_blank"><img class="result" src="${viewUrl(j.image)}" alt=""></a></div>`;
   }
-  if (j.status === "done" && (j.video || j.full_video)) {
+  if (["done", "voice_error"].includes(j.status) && (j.video || j.full_video || j.cloned_video)) {
     const tabs = [];
+    if (j.status === "done" && j.cloned_video) tabs.push(["cloned", "我的聲音", `outputs/${encodeURIComponent(j.cloned_video)}`]);
     if (j.full_video) tabs.push(["full", "完整版", `outputs/${j.full_video}`]);
-    if (j.video) tabs.push(["part", j.full_video ? "只看新片段" : "影片", viewUrl(j.video)]);
+    if (j.video) tabs.push(["part", j.cloned_video || j.voice_clone?.enabled ? "原始影片" : j.full_video ? "只看新片段" : "影片", viewUrl(j.video)]);
     const pick = state.videoTab[j.id] || tabs[0][0];
     const cur = tabs.find(t => t[0] === pick) || tabs[0];
     const cheer = state.cheer?.has(j.id) ? `<img class="cheer" src="static/img/cheer.png" alt="">` : "";
@@ -514,7 +556,7 @@ async function loadJobs() {
   }
   state.jobs = jobs;
   renderJobs();
-  schedulePoll(jobs.some(j => ["queued", "running", "joining"].includes(j.status)));
+  schedulePoll(jobs.some(j => ["queued", "running", "joining", "dubbing"].includes(j.status)));
 }
 
 function renderJobs() {
@@ -531,6 +573,7 @@ function renderJobs() {
         <span>seed ${j.seed}</span><span>${new Date(j.created * 1000).toLocaleString()}</span></div>
       <div class="jprompt" title="${esc(j.prompt)}">${esc(j.prompt)}</div>
       ${j.error ? `<div class="error">${esc(j.error)}</div>` : ""}${j.join_error ? `<div class="error">${esc(j.join_error)}</div>` : ""}
+      ${j.voice_error ? `<div class="error">配音失敗：${esc(j.voice_error)}。可播放原始影片。</div>` : ""}
       <div class="jactions">
         <button class="pill small" data-act="reuse">載入設定</button>
         <button class="pill small" data-act="copy">複製提示詞</button>
@@ -572,6 +615,12 @@ function reuseJob(job) {
   $("#seconds").value = job.seconds; $("#secondsVal").textContent = job.seconds;
   $("#skill").value = job.skill || "";
   $("#seed").value = job.seed;
+  const voice = job.voice_clone || {};
+  $("#useVoiceClone").checked = !!voice.enabled && !!state.config?.config.voice_clone?.enabled;
+  state.voiceReference = voice.reference_id || null;
+  $("#voiceText").value = voice.text || "";
+  $("#voiceFields").hidden = !$("#useVoiceClone").checked;
+  renderVoiceReference();
   syncSegs();
   renderTray(); renderSlots(); renderLibrary();
   $("#rewriteText").value = job.final_prompt;
@@ -659,6 +708,12 @@ async function loadRuns() {
 // ------------------------------------------------------------ settings
 async function loadConfig() {
   state.config = await api("api/config");
+  const voiceReady = !!state.config.config.voice_clone?.enabled;
+  $("#useVoiceClone").disabled = !voiceReady;
+  if (!voiceReady) $("#useVoiceClone").checked = false;
+  $("#voiceFields").hidden = !$("#useVoiceClone").checked;
+  $("#voiceAvailability").textContent = voiceReady ? "IndexTTS2 已啟用；上傳一段清晰的單人聲音作參考。"
+    : "尚未啟用 IndexTTS2；請在 Colab 安裝選項中開啟聲音克隆。";
   $("#skill").innerHTML = `<option value="">不使用</option>` +
     state.config.skills.map(s => `<option value="${s.id}">${esc(s.title)}</option>`).join("");
   $("#aspectSeg").innerHTML = `<button data-v="auto" title="頭尾格跟著首格、延伸跟著原片；生圖跟著第一張參考圖">自動</button>` +
@@ -791,6 +846,15 @@ async function checkComfy() {
 // ------------------------------------------------------------ wiring
 function bind() {
   $("#fileInput").addEventListener("change", e => { uploadFiles([...e.target.files]); e.target.value = ""; });
+  $("#voiceInput").addEventListener("change", e => {
+    uploadVoice(e.target.files[0]).catch(err => toast(err.message, true));
+    e.target.value = "";
+  });
+  $("#useVoiceClone").addEventListener("change", e => {
+    $("#voiceFields").hidden = !e.target.checked;
+    markStale();
+  });
+  $("#voiceText").addEventListener("input", markStale);
   const dz = $("#dropZone");
   const isFiles = e => [...(e.dataTransfer?.types || [])].includes("Files");
   for (const ev of ["dragenter", "dragover"]) document.addEventListener(ev, e => { e.preventDefault(); if (isFiles(e)) dz.classList.add("over"); });
