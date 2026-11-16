@@ -25,6 +25,7 @@ import struct
 import subprocess
 import threading
 import time
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,6 +35,7 @@ from pathlib import Path
 
 import av
 from PIL import Image, ImageOps
+import voice_clone
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
@@ -92,6 +94,7 @@ DEFAULT_CONFIG = {
     "extend": {"context_length": "22", "audio_context_length": 24, "tail_seconds": 3.0},
     # Colab: unload the 9B rewriter right after it answers, so it never sits in RAM next to the H3 models
     "free_after_rewrite": False,
+    "voice_clone": {"enabled": False, "python": "", "repo_dir": "", "model_dir": ""},
     # 🤖 短片 Agent: the planner that turns refs + one instruction into a segment contract.
     # openai = any OpenAI-compatible server (the local MoE on llama.cpp by default);
     # gemini = Google API, key read from key_file at call time (never copied into config or the browser)
@@ -167,6 +170,8 @@ SKILL_NAMES = {
 }
 
 lock = threading.Lock()
+# All Toybox GPU submissions share this gate with the isolated dubbing process.
+GPU_LOCK = threading.Lock()
 
 
 def load_json(path, default):
@@ -266,7 +271,8 @@ def comfy(cfg, path, payload=None, timeout=60):
 
 def queue_prompt(cfg, wf):
     try:
-        return comfy(cfg, "/prompt", {"prompt": wf, "client_id": MONITOR.client_id})["prompt_id"]
+        with GPU_LOCK:
+            return comfy(cfg, "/prompt", {"prompt": wf, "client_id": MONITOR.client_id})["prompt_id"]
     except urllib.error.HTTPError as e:
         raise RuntimeError("ComfyUI 拒絕了工作流：" + e.read().decode("utf-8", "replace")[:2000])
 
@@ -615,7 +621,9 @@ def add_output_to_library(cfg, job_id, folder=None):
                     i["from_job"] = job_id
             save_json(LIBRARY / "library.json", index)
         return dict(item, from_job=job_id)
-    if job.get("full_video"):
+    if job.get("cloned_video"):
+        body, name = (OUTPUTS / job["cloned_video"]).read_bytes(), job["cloned_video"]
+    elif job.get("full_video"):
         body, name = (OUTPUTS / job["full_video"]).read_bytes(), job["full_video"]
     else:
         v = job["video"]
@@ -1056,6 +1064,7 @@ def rewrite_openai(oa, rw, system, parts, max_tokens=None):
 
 def rewrite(cfg, req):
     tagged, chosen, task, src = collect(cfg, req, req["prompt"])
+    tagged = voice_clone.scene_prompt(tagged, req.get("voice_clone"))
     duration = float(req["seconds"])
     system, parts = rewrite_message(cfg, tagged, chosen, task, duration, req.get("skill"), src)
     rw = cfg["rewriter"]
@@ -1255,8 +1264,10 @@ def generate(cfg, req):
     mode = req.get("mode", "ref")
     if mode not in ("ref", "frames", "text"):
         raise ValueError("未知的模式")
+    voice = voice_clone.validate_request(cfg, req, asset, LIBRARY)
     duration = float(req["seconds"])
     tagged, chosen, task, src = collect(cfg, req, req["prompt"])
+    tagged = voice_clone.scene_prompt(tagged, voice)
     final_text = req.get("final_prompt") or raw_prompt(tagged, task, duration, chosen, src)
 
     auto_size = None
@@ -1286,6 +1297,8 @@ def generate(cfg, req):
     if src:
         job["extend"] = {"source_id": src["id"], "source_name": src["name"], "tail": src_job["tail_name"],
                          "has_audio": src.get("has_audio", False)}
+    if voice:
+        job["voice_clone"] = voice
     with lock:
         jobs = load_json(JOBS_PATH, [])
         jobs.insert(0, job)
@@ -1535,6 +1548,7 @@ def refresh_jobs(cfg):
 
 
 def _refresh_jobs(cfg):
+    voice_jobs = []
     with lock:
         jobs = load_json(JOBS_PATH, [])
     pending = [j for j in jobs if j["status"] in ("queued", "running", "joining")]
@@ -1569,6 +1583,9 @@ def _refresh_jobs(cfg):
                 if job.get("extend") and job["video"]:
                     job["status"] = "joining"
                     threading.Thread(target=join_worker, args=(cfg, dict(job)), daemon=True).start()
+                elif job.get("voice_clone", {}).get("enabled") and job["video"]:
+                    job["status"] = "dubbing"
+                    voice_jobs.append(dict(job))
                 else:
                     job["status"] = "done"
             elif job["id"] in running:
@@ -1578,6 +1595,9 @@ def _refresh_jobs(cfg):
             stored.update({j["id"]: j for j in pending})
             jobs = sorted(stored.values(), key=lambda j: -j["created"])
             save_json(JOBS_PATH, jobs)
+        # Persist the transition before workers can finish and update the job.
+        for job in voice_jobs:
+            threading.Thread(target=voice_worker, args=(cfg, job), daemon=True).start()
     stats = load_json(STATS_PATH, DEFAULT_STATS)
     for job in jobs:
         if job["status"] in ("queued", "running"):
@@ -1587,7 +1607,66 @@ def _refresh_jobs(cfg):
                                "live": MONITOR.connected}
         elif job["status"] == "joining":
             job["progress"] = {"stage": "join", "percent": 99, "eta": 5, "live": True}
+        elif job["status"] == "dubbing":
+            job["progress"] = {"stage": "dubbing", "percent": 99, "eta": None, "live": True}
     return jobs
+
+
+def voice_worker(cfg, job):
+    try:
+        OUTPUTS.mkdir(parents=True, exist_ok=True)
+        reference = asset(job["voice_clone"]["reference_id"])
+        with tempfile.TemporaryDirectory(prefix="h3video-", dir=OUTPUTS) as directory:
+            video = Path(directory) / "original.mp4"
+            comfy_download(cfg, job["video"], video)
+            # Stop new Toybox submissions, drain work already queued, then unload H3.
+            # This gate cannot coordinate clients that submit directly to ComfyUI.
+            with GPU_LOCK:
+                deadline = time.monotonic() + 1800
+                while True:
+                    queue = comfy(cfg, "/queue")
+                    if not queue.get("queue_running") and not queue.get("queue_pending"):
+                        break
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("等待 ComfyUI 釋放 GPU 逾時，原片仍可下載")
+                    time.sleep(1)
+                comfy(cfg, "/free", {"unload_models": True, "free_memory": True})
+                # /free sets flags processed by ComfyUI's worker on its next idle tick.
+                deadline = time.monotonic() + 60
+                while True:
+                    stats = comfy(cfg, "/system_stats")
+                    devices = [d for d in stats.get("devices", []) if d.get("type") == "cuda"]
+                    if devices and all(d.get("torch_vram_total", 0) <= 512 * 2**20
+                                       and d.get("vram_free", 0) >= 8 * 2**30 for d in devices):
+                        break
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("ComfyUI 尚未釋放模型記憶體，請稍後重試")
+                    time.sleep(1)
+                name = f"{job['id']}_voice.mp4"
+                voice_clone.synthesize_and_replace(
+                    cfg["voice_clone"], LIBRARY / reference["file"], job["voice_clone"]["text"],
+                    video, OUTPUTS / name, ROOT / "voice_runner.py",
+                    keep_background=job["voice_clone"].get("keep_background", True),
+                )
+        update = {"status": "done", "cloned_video": name, "finished": time.time()}
+    except Exception as e:
+        update = {"status": "voice_error", "voice_error": f"克隆配音失敗：{e}", "finished": time.time()}
+    with lock:
+        jobs = load_json(JOBS_PATH, [])
+        for stored in jobs:
+            if stored["id"] == job["id"]:
+                stored.update(update)
+        save_json(JOBS_PATH, jobs)
+
+
+def recover_voice_jobs():
+    """A restarted server has no surviving subprocess; never leave its jobs stuck."""
+    with lock:
+        jobs = load_json(JOBS_PATH, [])
+        for job in jobs:
+            if job.get("status") == "dubbing":
+                job.update(status="voice_error", voice_error="伺服器重啟中斷配音，請重用設定重新生成；原片仍可下載")
+        save_json(JOBS_PATH, jobs)
 
 
 def join_worker(cfg, job):
@@ -2046,6 +2125,7 @@ def safe_child(base, rel):
 if __name__ == "__main__":
     LIBRARY.mkdir(parents=True, exist_ok=True)
     OUTPUTS.mkdir(parents=True, exist_ok=True)
+    recover_voice_jobs()
     n = restore_inputs(load_config())
     if n:
         print(f"Restored {n} library files into ComfyUI's input folder")

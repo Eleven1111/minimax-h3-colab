@@ -117,6 +117,18 @@
         <label>速度</label>
         <label class="switch"><input id="fastMode" type="checkbox" checked><span></span> ⚡ 快速模式 <small class="hint" id="fastHint">8 步</small></label>
       </div>
+      <div class="opt voice-clone" data-only="video">
+        <label class="switch"><input id="useVoiceClone" type="checkbox"><span></span> 🎙 用我的聲音配音</label>
+        <small class="hint" id="voiceAvailability">正在檢查 IndexTTS2…</small>
+        <div id="voiceFields" hidden>
+          <label class="btn pill small yellow">上傳我的聲音<input id="voiceInput" type="file" accept="audio/*" hidden></label>
+          <span id="voiceName" class="hint">尚未選擇聲音</span>
+          <audio id="voicePreview" controls preload="metadata" hidden></audio>
+          <label for="voiceText">要說的台詞</label>
+          <textarea id="voiceText" rows="3" placeholder="填入這支影片要說的完整台詞，請控制在影片時長內。"></textarea>
+          <small class="hint">以你上傳的聲音重新配音，保留背景音樂與音效（人聲分離可能有少量殘音）；不保證自動對口型。目前支援單支影片，延伸影片與短片 Agent 暫不支援。</small>
+        </div>
+      </div>
       <div class="opt" data-only="video image">
         <label>Seed（空白＝隨機）</label>
         <input id="seed" type="number" placeholder="隨機">

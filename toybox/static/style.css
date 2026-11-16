@@ -20,6 +20,13 @@
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+
+.voice-clone { grid-column: 1 / -1; }
+.voice-clone #voiceFields { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 8px; width: 100%; }
+.voice-clone textarea { width: 100%; box-sizing: border-box; resize: vertical; border: 2px solid var(--ink); border-radius: 12px; padding: 10px; font: inherit; }
+.voice-clone audio { width: min(100%, 360px); }
+.st.dubbing { background: var(--yellow); }
+.st.voice_error { background: #ffe4e4; }
 html, body { margin: 0; height: 100%; color: var(--ink); font: 14px/1.5 var(--font); }
 body {
   background-color: var(--paper);

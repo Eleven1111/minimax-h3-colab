@@ -65,6 +65,34 @@ SelfLift 採樣器會把 `minimax_keyframes` 縮到低解析度階段，所以�
 
 SelfLift 兩段採樣從 12 步（低 6＋高 6）降到 8 步（低 4＋高 4）。步數設定在 `config.json` 的 `steps`。
 
+## 🎙 用自己的聲音配音（IndexTTS2）
+
+單支影片現在可上傳照片與一段自己的聲音，再填入要說的完整台詞。流程為 **H3 生成原片 → 釋放 H3 顯存 → IndexTTS2 克隆配音 → Demucs 分離原片人聲 → 新配音與背景音混合**。原片一直保留，配音失敗也可播放、下載原片。
+
+### Colab 使用
+
+1. 從此 fork 開啟 `H3_Toybox.ipynb`。在 ② 勾選 `INSTALL_VOICE_CLONE` 再執行，然後重跑 ③。測試尚未合併的 PR 時，在 ① 將 `TOYBOX_REPO` 設為 PR 的 fork（例如 `Eleven1111/minimax-h3-colab`），`TOYBOX_REF` 設為 PR 分支；預設來源為本 fork 的 `main`。預設不勾，原有功能無需額外下載。
+2. 在影片頁上傳人物照並加入參考（或設為首格），勾選「用我的聲音配音」，透過其專用按鈕上傳 **3–30 秒清晰單人錄音**。聲音參考不會自動加入 H3 的素材盤。
+3. 在「要說的台詞」填寫短句，再設定影片秒數。改寫預覽會把這段台詞作為唯一對白；克隆配音也使用同一段文字。
+4. 生成完成後，結果卡可切換「我的聲音」與「原始影片」。加入素材庫時採用克隆配音版。
+
+模型使用官方 [IndexTTS2 v2.0.0](https://github.com/index-tts/index-tts/tree/v2.0.0) 與 [IndexTeam/IndexTTS-2](https://huggingface.co/IndexTeam/IndexTTS-2)，代碼及主要權重固定 revision，未改用 IndexTTS 2.5。安裝器用獨立 Python 3.10、上游鎖檔與 CUDA 12.8 PyTorch，保留 ComfyUI 的 CUDA 13 環境，並在隔離環境安裝 Demucs 4.0.1、快取 `htdemucs`。需預留額外數 GB 磁碟與下載時間；IndexTTS 輔助模型仍可能在首次配音時下載。Demucs 使用 CPU，會增加處理時間。
+
+### 範圍與限制
+
+- 目前處理單一說話者的單支影片，支援參考生成、首尾格、純文字；不處理短片 Agent、多角色、延伸影片或自動語音識別。
+- 保留的是 Demucs 分離出的非人聲背景，可能有殘留人聲或部分音效損失；不保證與原片背景逐樣本一致。
+- 這是生成後重新配音，沒有新增對口型模型。配音從片頭開始，沒有逐句對齊原人聲的停頓；畫面口型、發音時刻與語氣不保證同步。
+- 配音短於影片時補靜音，背景音繼續播放；略長時最多加速 1.25 倍；再長就顯示失敗並保留原片，不截斷台詞。
+- 同一 Toybox 的 GPU 提交與配音互斥；已有 Comfy 工作先完成，再卸載 H3 並等待顯存釋放。配音時避免其他客戶端直接向 ComfyUI 提交工作。
+- 聲音錄音作為素材存於原有 `library/`；若啟用 `SAVE_TO_DRIVE`，會隨素材存到 Google Drive。生成過程中的臨時錄音、分離音軌會清理。只上傳自己或已獲授權使用的聲音。
+
+本機 Linux 也可執行 `python tools/install_indextts2.py --root /path/to/indextts2`，將產生的 `toybox_voice_config.json` 內容合併到 Toybox `config.json` 的 `voice_clone` 欄位後重啟。此安裝器不支援 macOS；目前尚未完成真實 Colab GPU 端到端驗證。
+
+### 開發驗證
+
+`python3 -m unittest discover -s toybox/tests -v`。媒體整合測試使用本機 ffmpeg/ffprobe 和合成測試音，檢查保留畫面、混入背景及新配音、時長、錯誤回退與臨時檔清理；不代表真實 IndexTTS 聲音相似度或 Demucs 分離品質已驗證。
+
 ## 📁 素材庫資料夾
 
 素材可以拖進資料夾整理；拖到「🧸 全部素材」就移出來。資料夾只有一層，存在 `library/folders.json`，素材的 `folder` 欄位指向它。刪資料夾不會刪素材，素材會回到最外層。在資料夾裡上傳，或從生成結果「加入素材庫」，都會直接放進目前的資料夾。
