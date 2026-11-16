@@ -37,6 +37,7 @@ from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parent
 STATIC = ROOT / "static"
+BUILTIN_SKILLS = ROOT / "directional_skills"
 TEMPLATE_PATH = ROOT / "WF.json"
 # Everything the user makes lives under DATA (Colab points it at Google Drive so a dropped runtime loses nothing).
 DATA = Path(os.environ.get("H3TOYBOX_DATA") or ROOT)
@@ -162,6 +163,7 @@ SKILL_NAMES = {
     "continuous_combat": "Fisher-連續戰鬥長鏡頭", "cinematic_gunfight": "兔子-電影槍戰導演",
     "ning_wenwu": "寧版-文武雙全", "drama_scene": "戲劇場面｜關係與潛台詞",
     "situational_drama": "情境戲劇｜處境與鋪墊回收", "zhenzhen_pov": "貞貞-POV劇情導演",
+    "product_ad": "產品廣告｜豎屏快節奏・密集鉤子・反轉",
 }
 
 lock = threading.Lock()
@@ -772,22 +774,23 @@ def media_path(item):
 # ---------------------------------------------------------------- prompt rewriting
 
 def load_skills(cfg):
-    skills = []
-    base = Path(cfg["skills_dir"])
-    if base.is_dir():
-        for d in sorted(base.iterdir()):
-            if (d / "SKILL.md").is_file():
-                skills.append({"id": d.name, "title": SKILL_NAMES.get(d.name, d.name)})
-    return skills
+    skills = {}
+    for base in (Path(cfg["skills_dir"]), BUILTIN_SKILLS):
+        if base.is_dir():
+            for d in sorted(base.iterdir()):
+                if (d / "SKILL.md").is_file():
+                    skills[d.name] = {"id": d.name, "title": SKILL_NAMES.get(d.name, d.name)}
+    return [skills[key] for key in sorted(skills)]
 
 
 def skill_text(cfg, skill_id):
     if not skill_id:
         return ""
-    path = Path(cfg["skills_dir"]) / skill_id / "SKILL.md"
-    if path.parent.parent != Path(cfg["skills_dir"]) or not path.is_file():
-        raise ValueError(f"找不到導演 Skill：{skill_id}")
-    return re.sub(r"^---\n.*?\n---\n", "", path.read_text(encoding="utf-8"), flags=re.S).strip()
+    for base in (BUILTIN_SKILLS, Path(cfg["skills_dir"])):
+        path = base / skill_id / "SKILL.md"
+        if path.parent.parent == base and path.is_file():
+            return re.sub(r"^---\n.*?\n---\n", "", path.read_text(encoding="utf-8"), flags=re.S).strip()
+    raise ValueError(f"找不到導演 Skill：{skill_id}")
 
 
 def pad_square(im, side):
