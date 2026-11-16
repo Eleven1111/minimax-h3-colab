@@ -22,6 +22,8 @@ def install(root):
         raise RuntimeError("This installer targets Linux/Colab with an NVIDIA GPU.")
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
+    # A failed reinstall may leave an incomplete runtime; never reuse an old ready marker.
+    (root / "toybox_voice_config.json").unlink(missing_ok=True)
     repo = root / "source"
     env = dict(os.environ, GIT_LFS_SKIP_SMUDGE="1")
     new_checkout = not (repo / ".git").is_dir()

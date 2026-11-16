@@ -67,6 +67,7 @@ class VoiceSetupTests(unittest.TestCase):
     def test_failed_install_does_not_publish_manifest(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            (root / "toybox_voice_config.json").write_text('{"enabled": true}')
             with patch.object(installer.sys, "platform", "linux"), \
                     patch.object(installer.subprocess, "run", side_effect=RuntimeError("download unavailable")):
                 with self.assertRaises(RuntimeError):

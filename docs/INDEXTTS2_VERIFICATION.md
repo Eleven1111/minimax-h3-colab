@@ -3,7 +3,7 @@
 ## Check: request validation and job lifecycle
 **Evidence type:** Runtime tests with stubbed ComfyUI/model calls.
 **Command or source:** `python3 -m unittest discover -s toybox/tests -v`
-**Observation:** On the combined working branch, 20 tests passed, including the 5 existing director tests. New checks cover explicit dialogue, reference duration/type, extension rejection, disabled setup, one-time dubbing dispatch after persistence, GPU submission gating, unloading before synthesis, deleted references and restart recovery. Tests exercise real server functions extracted without importing unavailable GPU/media dependencies.
+**Observation:** On the combined working branch, 20 tests passed, including the 5 existing director tests; the standalone voice-cloning PR has 15 passing tests and excludes the pending director feature. New checks cover explicit dialogue, reference duration/type, extension rejection, disabled setup, one-time dubbing dispatch after persistence, GPU submission gating, unloading before synthesis, deleted references and restart recovery. Tests exercise real server functions extracted without importing unavailable GPU/media dependencies.
 **Result: PASS** for the tested orchestration. Actual CUDA memory release is not established by these stubs.
 
 ## Check: video and audio composition
